@@ -33,4 +33,4 @@ jobs:
     - run: cp test/custom.conf .
     - run: npm install
     - run: npm ci
-    - run: sudo env PATH="$PATH" npm test
+    - run: sudo env PATH="$PATH" ./node_modules/.bin/nodeunit ./test
