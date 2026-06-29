@@ -293,6 +293,8 @@ app.controller("Webui", ['$scope', 'socket', 'ServerService', '$filter', '$trans
   $scope.servers = ServerService.servers;
   $scope.current = null;
   $scope.build_jar_log = [];
+  $scope.paper_builder = { group: 'paper' };
+  $scope.paper_versions = {};
   $scope.user_input = { input: { text: '' } }; //convoluted structure required; see http://jsfiddle.net/sirhc/z9cGm/#run
 
   $scope.serverprofiles = {
@@ -429,12 +431,15 @@ app.controller("Webui", ['$scope', 'socket', 'ServerService', '$filter', '$trans
 
   socket.on('/', 'profile_list', function(profile_data) {
     $scope.profiles = profile_data;
+    $scope.paper_versions = {};
 
     for (var p in profile_data)
       if (profile_data[p].id == 'BuildTools-latest')
         $scope.buildtools_jar = profile_data[p];
       else if (profile_data[p].id == 'PaperTools-latest')
         $scope.papertools_jar = profile_data[p];
+      else if (profile_data[p].group == 'paper')
+        $scope.paper_versions[profile_data[p].version] = true;
   })
 
   socket.on('/', 'user_list', function(user_data) {

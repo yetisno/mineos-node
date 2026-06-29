@@ -1,6 +1,6 @@
 REGISTRY_NAME := 
-REPOSITORY_NAME := hexparrot/
-IMAGE_NAME := mineos
+REPOSITORY_NAME := yetisno/
+IMAGE_NAME := mineos-lts-java
 TAG := :latest
 
 .PHONY: getcommitid

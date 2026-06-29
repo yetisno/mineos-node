@@ -12,6 +12,29 @@ logging.add(logging.transports.File, {
   handleExceptions: true
 });
 
+function cancel_fireworm_dir_updates(dir) {
+  if (!dir)
+    return;
+
+  if (dir.update && dir.update.cancel)
+    dir.update.cancel();
+
+  if (dir.forceUpdate && dir.forceUpdate.cancel)
+    dir.forceUpdate.cancel();
+
+  for (var entryName in (dir.entries || {}))
+    cancel_fireworm_dir_updates(dir.entries[entryName]);
+}
+
+function destroy_fireworm(fw) {
+  if (!fw || !fw.dir)
+    return;
+
+  cancel_fireworm_dir_updates(fw.dir);
+  fw.dir.destroy();
+  fw.removeAllListeners();
+}
+
 server.backend = function(base_dir, socket_emitter, user_config) {
   var self = this;
 
@@ -19,6 +42,7 @@ server.backend = function(base_dir, socket_emitter, user_config) {
   self.profiles = [];
   self.front_end = socket_emitter;
   self.commit_msg = '';
+  var shutdown_callbacks = [];
 
   process.umask(0002);
 
@@ -30,6 +54,143 @@ server.backend = function(base_dir, socket_emitter, user_config) {
   fs.ensureDirSync(path.join(base_dir, mineos.DIRS['profiles']));
 
   fs.chmod(path.join(base_dir, mineos.DIRS['import']), 0777);
+
+  function built_jar_dir(type, version) {
+    if (['spigot', 'paper'].indexOf(type) < 0)
+      return null;
+
+    return path.join(base_dir, mineos.DIRS['profiles'], '{0}_{1}'.format(type, version));
+  }
+
+  function paper_download_paths(version, build, working_dir) {
+    var filename = 'paper-{0}-{1}.jar'.format(version, build);
+    var temp_dir = path.join(path.dirname(working_dir), '.{0}.download-{1}-{2}'.format(path.basename(working_dir), process.pid, Date.now()));
+
+    return {
+      working_dir: working_dir,
+      filename: filename,
+      download_url: 'https://api.papermc.io/v2/projects/paper/versions/{0}/builds/{1}/downloads/{2}'.format(version, build, filename),
+      dest_path: path.join(working_dir, filename),
+      temp_dir: temp_dir,
+      temp_path: path.join(temp_dir, filename),
+      staged_path: path.join(working_dir, '.{0}.{1}.tmp'.format(filename, process.pid))
+    };
+  }
+
+  function cleanup_paper_download(temp_dir, callback) {
+    fs.remove(temp_dir, function(cleanup_err) {
+      callback(cleanup_err);
+    });
+  }
+
+  function remove_stale_paper_jars(working_dir, dest_path, callback) {
+    fs.readdir(working_dir, function(list_err, listing) {
+      if (list_err)
+        return callback(list_err);
+
+      async.each(
+        listing.filter(function(filename) { return filename.match(/.+\.jar/i) && filename != path.basename(dest_path); }),
+        function(stale_jar, next) { fs.remove(path.join(working_dir, stale_jar), next); },
+        callback
+      );
+    });
+  }
+
+  function install_paper_download(paths, callback) {
+    fs.ensureDir(paths.working_dir, function(dir_err) {
+      if (dir_err)
+        return callback(dir_err);
+
+      fs.move(paths.temp_path, paths.staged_path, { overwrite: true }, function(move_err) {
+        if (move_err)
+          return callback(move_err);
+
+        fs.rename(paths.staged_path, paths.dest_path, function(rename_err) {
+          if (rename_err)
+            return fs.remove(paths.staged_path, function() { callback(rename_err); });
+
+          remove_stale_paper_jars(paths.working_dir, paths.dest_path, callback);
+        });
+      });
+    });
+  }
+
+  function stream_paper_download(download_url, temp_path, callback) {
+    var request = require('request');
+    var download = request({ url: download_url, headers: {'User-Agent': 'MineOS-node'} });
+    var output = fs.createWriteStream(temp_path);
+    var done = false;
+
+    function finish(err) {
+      if (done)
+        return;
+
+      done = true;
+      if (err) {
+        if (download.abort)
+          download.abort();
+
+        output.destroy();
+      }
+      callback(err);
+    }
+
+    download.on('response', function(download_response) {
+      if (download_response.statusCode != 200)
+        finish(new Error('PaperMC download returned HTTP {0}'.format(download_response.statusCode)));
+    });
+    download.on('error', finish);
+    output.on('error', finish);
+    output.on('finish', function() { finish(); });
+    download.pipe(output);
+  }
+
+  function latest_paper_build(version, response, body) {
+    if (response.statusCode != 200)
+      return { error: new Error('PaperMC version lookup returned HTTP {0}'.format(response.statusCode)) };
+
+    if (!body || typeof body != 'object' || !body.builds || !body.builds.length)
+      return { error: new Error('PaperMC returned no builds for {0}'.format(version)) };
+
+    return { build: body.builds[body.builds.length - 1] };
+  }
+
+  function download_paper_jar(version, working_dir, callback) {
+    var request = require('request');
+    var api_url = 'https://api.papermc.io/v2/projects/paper/versions/{0}'.format(version);
+
+    request({ url: api_url, json: true, headers: {'User-Agent': 'MineOS-node'} }, function(err, response, body) {
+      if (err)
+        return callback(err);
+
+      var build_result = latest_paper_build(version, response, body);
+      if (build_result.error)
+        return callback(build_result.error);
+
+      var paths = paper_download_paths(version, build_result.build, working_dir);
+
+      fs.ensureDir(paths.temp_dir, function(dir_err) {
+        if (dir_err)
+          return callback(dir_err);
+
+        self.front_end.emit('build_jar_output', 'Downloading {0}\n'.format(paths.download_url));
+
+        stream_paper_download(paths.download_url, paths.temp_path, function(download_err) {
+          if (download_err)
+            return cleanup_paper_download(paths.temp_dir, function() { callback(download_err); });
+
+          install_paper_download(paths, function(install_err) {
+            cleanup_paper_download(paths.temp_dir, function(cleanup_err) {
+              if (install_err || cleanup_err)
+                return callback(install_err || cleanup_err);
+
+              callback(null, paths.dest_path);
+            });
+          });
+        });
+      });
+    });
+  }
 
   (function() {
     var which = require('which');
@@ -56,11 +217,22 @@ server.backend = function(base_dir, socket_emitter, user_config) {
     var UDP_DEST = '255.255.255.255';
     var UDP_PORT = 4445;
     var BROADCAST_DELAY_MS = 4000;
+    var broadcast_timer = null;
+    var broadcaster_stopped = false;
 
     async.forever(
       function(next) {
+        if (broadcaster_stopped)
+          return;
+
         for (var s in self.servers) {
+          if (!self.servers[s] || !self.servers[s].broadcast_to_lan)
+            continue;
+
           self.servers[s].broadcast_to_lan(function(msg, server_ip) {
+            if (broadcaster_stopped)
+              return;
+
             if (msg) {
               if (udp_broadcaster[server_ip]) {
                 udp_broadcaster[server_ip].send(msg, 0, msg.length, UDP_PORT, UDP_DEST);
@@ -68,6 +240,11 @@ server.backend = function(base_dir, socket_emitter, user_config) {
                 udp_broadcaster[server_ip] = dgram.createSocket('udp4');
                 udp_broadcaster[server_ip].bind(UDP_PORT, server_ip);
                 udp_broadcaster[server_ip].on("listening", function () {
+                  if (broadcaster_stopped) {
+                    udp_broadcaster[server_ip].close();
+                    return;
+                  }
+
                   udp_broadcaster[server_ip].setBroadcast(true);
                   udp_broadcaster[server_ip].send(msg, 0, msg.length, UDP_PORT, UDP_DEST);
                 });
@@ -78,9 +255,20 @@ server.backend = function(base_dir, socket_emitter, user_config) {
             }
           })
         }
-        setTimeout(next, BROADCAST_DELAY_MS);
+        broadcast_timer = setTimeout(next, BROADCAST_DELAY_MS);
       }
     )
+
+    shutdown_callbacks.push(function() {
+      broadcaster_stopped = true;
+      if (broadcast_timer)
+        clearTimeout(broadcast_timer);
+
+      for (var server_ip in udp_broadcaster)
+        try {
+          udp_broadcaster[server_ip].close();
+        } catch (e) {}
+    });
   })();
 
   (function() {
@@ -131,8 +319,13 @@ server.backend = function(base_dir, socket_emitter, user_config) {
       })
     }
 
-    setInterval(host_diskspace, HOST_DU_HEARTBEAT_DELAY_MS);
-    setInterval(host_heartbeat, HOST_HEARTBEAT_DELAY_MS);
+    var diskspace_interval = setInterval(host_diskspace, HOST_DU_HEARTBEAT_DELAY_MS);
+    var heartbeat_interval = setInterval(host_heartbeat, HOST_HEARTBEAT_DELAY_MS);
+
+    shutdown_callbacks.push(function() {
+      clearInterval(diskspace_interval);
+      clearInterval(heartbeat_interval);
+    });
     
   })();
 
@@ -173,7 +366,7 @@ server.backend = function(base_dir, socket_emitter, user_config) {
     for (var i in discovered_servers)
       track(discovered_servers[i]);
 
-    fs.watch(server_path, function() {
+    var server_watcher = fs.watch(server_path, function() {
       var current_servers = discover();
 
       for (var i in current_servers)
@@ -185,6 +378,10 @@ server.backend = function(base_dir, socket_emitter, user_config) {
           untrack(s);
 
     })
+
+    shutdown_callbacks.push(function() {
+      server_watcher.close();
+    });
   })();
 
   (function() {
@@ -206,6 +403,10 @@ server.backend = function(base_dir, socket_emitter, user_config) {
         logging.info('[WEBUI] File removed from import directory', fp);
         self.send_importable_list();
       })
+
+    shutdown_callbacks.push(function() {
+      destroy_fireworm(fw);
+    });
   })();
 
   self.start_servers = function() {
@@ -228,11 +429,19 @@ server.backend = function(base_dir, socket_emitter, user_config) {
     )
   }
 
-  setTimeout(self.start_servers, 5000);
+  var start_servers_timeout = setTimeout(self.start_servers, 5000);
+
+  shutdown_callbacks.push(function() {
+    clearTimeout(start_servers_timeout);
+  });
 
   self.shutdown = function() {
+    while (shutdown_callbacks.length)
+      shutdown_callbacks.pop()();
+
     for (var server_name in self.servers)
-      self.servers[server_name].cleanup();
+      if (self.servers[server_name] && self.servers[server_name].cleanup)
+        self.servers[server_name].cleanup();
   }
 
   self.send_profile_list = function(send_existing) {
@@ -307,7 +516,7 @@ server.backend = function(base_dir, socket_emitter, user_config) {
       async.apply(fs.readdir, profiles_dir),
       function(listing, cb) {
         for (var i in listing) {
-          var match = listing[i].match(/(paper)?spigot_([\d\.]+)/);
+          var match = listing[i].match(/^(spigot|paper|paperspigot)_([\d\.]+)$/);
           if (match)
             spigot_profiles[match[0]] = {
               'directory': match[0],
@@ -478,10 +687,11 @@ server.backend = function(base_dir, socket_emitter, user_config) {
 
           try {
             var profile_path = path.join(base_dir, mineos.DIRS['profiles']);
-            var working_dir = path.join(profile_path, '{0}_{1}'.format(args.builder.group, args.version));
-            var bt_path = path.join(profile_path, args.builder.id, args.builder.filename);
-            var dest_path = path.join(working_dir, args.builder.filename);
+            var working_dir = built_jar_dir(args.builder.group, args.version);
             var params = { cwd: working_dir };
+            var build_type = args.builder.group;
+            if (!working_dir)
+              throw new Error('Unsupported built jar type: {0}'.format(args.builder.group));
           } catch (e) {
             logging.error('[WEBUI] Could not build jar; insufficient/incorrect arguments provided:', args);
             logging.error(e);
@@ -489,41 +699,55 @@ server.backend = function(base_dir, socket_emitter, user_config) {
           }
 
           async.series([
-            async.apply(fs.mkdir, working_dir),
-            async.apply(fs.copy, bt_path, dest_path),
             function(cb) {
-              var binary = which.sync('java');
-              var proc = child_process.spawn(binary, ['-Xms512M', '-jar', dest_path, '--rev', args.version], params);
+              if (build_type == 'paper')
+                return download_paper_jar(args.version, working_dir, cb);
 
-              proc.stdout.on('data', function (data) {
-                self.front_end.emit('build_jar_output', data.toString());
-                //logging.log('stdout: ' + data);
-              });
+              var bt_path = path.join(profile_path, args.builder.id, args.builder.filename);
+              var dest_path = path.join(working_dir, args.builder.filename);
 
-              logging.info('[WEBUI] BuildTools starting with arguments:', args)
+              fs.mkdir(working_dir, function(mkdir_err) {
+                if (mkdir_err)
+                  return cb(mkdir_err);
 
-              proc.stderr.on('data', function (data) {
-                self.front_end.emit('build_jar_output', data.toString());
-                logging.error('stderr: ' + data);
-              });
+                fs.copy(bt_path, dest_path, function(copy_err) {
+                  if (copy_err)
+                    return cb(copy_err);
 
-              proc.on('close', function (code) {
-                cb(code);
+                  var binary = which.sync('java');
+                  var proc = child_process.spawn(binary, ['-Xms512M', '-jar', dest_path, '--rev', args.version], params);
+
+                  proc.stdout.on('data', function (data) {
+                    self.front_end.emit('build_jar_output', data.toString());
+                    //logging.log('stdout: ' + data);
+                  });
+
+                  logging.info('[WEBUI] BuildTools starting with arguments:', args)
+
+                  proc.stderr.on('data', function (data) {
+                    self.front_end.emit('build_jar_output', data.toString());
+                    logging.error('stderr: ' + data);
+                  });
+
+                  proc.on('close', function (code) {
+                    cb(code, dest_path);
+                  });
+                });
               });
             }
           ], function(err, results) {
-            logging.info('[WEBUI] BuildTools jar compilation finished {0} in {1}'.format( (err ? 'unsuccessfully' : 'successfully'), working_dir));
-            logging.info('[WEBUI] Buildtools used: {0}'.format(dest_path));
+            logging.info('[WEBUI] {0} jar build finished {1} in {2}'.format(build_type, (err ? 'unsuccessfully' : 'successfully'), working_dir));
+            logging.info('[WEBUI] Built jar source: {0}'.format(results && results[0] ? results[0] : working_dir));
 
             var retval = {
-              'command': 'BuildTools jar compilation',
+              'command': '{0} jar build'.format(build_type),
               'success': true,
               'help_text': ''
             }
 
             if (err) {
               retval['success'] = false;
-              retval['help_text'] = "Error {0} ({1}): {2}".format(err.errno, err.code, err.path);
+              retval['help_text'] = err.message || "Error {0}".format(err);
             }
 
             self.front_end.emit('host_notice', retval);
@@ -531,16 +755,15 @@ server.backend = function(base_dir, socket_emitter, user_config) {
           })
           break;
         case 'delete_build':
-          if (args.type == 'spigot')
-            var spigot_path = path.join(base_dir, mineos.DIRS['profiles'], 'spigot_' + args.version);
-          else {
+          var spigot_path = built_jar_dir(args.type, args.version);
+          if (!spigot_path) {
             logging.error('[WEBUI] Unknown type of craftbukkit server -- potential modified webui request?');
             return;
           }
 
           fs.remove(spigot_path, function(err) {
             var retval = {
-              'command': 'Delete BuildTools jar',
+              'command': 'Delete built jar',
               'success': true,
               'help_text': ''
             }
@@ -557,8 +780,9 @@ server.backend = function(base_dir, socket_emitter, user_config) {
         case 'copy_to_server':
           var rsync = require('rsync');
 
-          if (args.type == 'spigot')
-            var spigot_path = path.join(base_dir, mineos.DIRS['profiles'], 'spigot_' + args.version) + '/';
+          var spigot_path = built_jar_dir(args.type, args.version);
+          if (spigot_path)
+            spigot_path += '/';
           else {
             logging.error('[WEBUI] Unknown type of craftbukkit server -- potential modified webui request?');
             return;
@@ -579,7 +803,7 @@ server.backend = function(base_dir, socket_emitter, user_config) {
 
           obj.execute(function(error, code, cmd) {
             var retval = {
-              'command': 'BuildTools jar copy',
+              'command': 'Built jar copy',
               'success': true,
               'help_text': ''
             }
@@ -720,9 +944,11 @@ function server_container(server_name, user_config, socket_io) {
   var instance = new mineos.mc(server_name, user_config.base_directory),
       nsp = socket_io.of('/{0}'.format(server_name)),
       tails = {},
+      tail_watchers = {},
       notices = [],
       cron = {},
       intervals = {},
+      server_file_watcher = null,
       HEARTBEAT_INTERVAL_MS = 5000,
       COMMIT_INTERVAL_MIN = null;
 
@@ -780,17 +1006,17 @@ function server_container(server_name, user_config, socket_io) {
 
     logging.info('[{0}] Using skipDirEntryPatterns: {1}'.format(server_name, skip_dirs));
 
-    var fw = fireworm(instance.env.cwd, {skipDirEntryPatterns: skip_dirs});
+    server_file_watcher = fireworm(instance.env.cwd, {skipDirEntryPatterns: skip_dirs});
 
     for (var i in skip_dirs) {
-	fw.ignore(skip_dirs[i]);
+	server_file_watcher.ignore(skip_dirs[i]);
     }
-    fw.add('**/server.properties');
-    fw.add('**/server.config');
-    fw.add('**/cron.config');
-    fw.add('**/eula.txt');
-    fw.add('**/server-icon.png');
-    fw.add('**/config.yml');
+    server_file_watcher.add('**/server.properties');
+    server_file_watcher.add('**/server.config');
+    server_file_watcher.add('**/cron.config');
+    server_file_watcher.add('**/eula.txt');
+    server_file_watcher.add('**/server-icon.png');
+    server_file_watcher.add('**/config.yml');
 
     var FS_DELAY = 250; 
     function handle_event(fp) {
@@ -821,8 +1047,8 @@ function server_container(server_name, user_config, socket_io) {
       }
     }
 
-    fw.on('add', handle_event);
-    fw.on('change', handle_event);
+    server_file_watcher.on('add', handle_event);
+    server_file_watcher.on('change', handle_event);
   })();
 
   intervals['heartbeat'] = setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
@@ -968,8 +1194,18 @@ function server_container(server_name, user_config, socket_io) {
   }
 
   self.cleanup = function () {
+    for (var w in tail_watchers) {
+      destroy_fireworm(tail_watchers[w]);
+      delete tail_watchers[w];
+    }
+
     for (var t in tails)
       tails[t].unwatch();
+
+    if (server_file_watcher && server_file_watcher.dir) {
+      destroy_fireworm(server_file_watcher);
+      server_file_watcher = null;
+    }
 
     for (var i in intervals)
       clearInterval(intervals[i]);
@@ -1075,11 +1311,14 @@ function server_container(server_name, user_config, socket_io) {
       var fireworm = require('fireworm');
       var default_skips = ['world', 'world_the_end', 'world_nether', 'dynmap', 'plugins', 'web', 'region', 'playerdata', 'stats', 'data'];
       var fw = fireworm(instance.env.cwd, {skipDirEntryPatterns: default_skips});
+      tail_watchers[rel_filepath] = fw;
 
       fw.add('**/{0}'.format(rel_filepath));
       fw.on('add', function(fp) {
         if (abs_filepath == fp) {
           fw.clear();
+          destroy_fireworm(fw);
+          delete tail_watchers[rel_filepath];
           logging.info('[{0}] {1} created! Watchfile {2} closed'.format(server_name, path.basename(fp), rel_filepath));
           async.nextTick(function() { make_tail(rel_filepath) });
         }
@@ -1479,4 +1718,3 @@ function server_container(server_name, user_config, socket_io) {
 
   }) //nsp on connect container ends
 }
-

@@ -9,9 +9,9 @@ This page is a work-in-progress and is considered to be ripe for improvement.
 This installation guide assumes you have installed docker on your server host; the steps vary too widely between distributions to cover it in this page.
 
 ```
-# docker pull hexparrot/mineos
+# docker pull yetisno/mineos-lts-java
 # docker image ls | grep mineos
-hexparrot/mineos          latest       0c24f1172457   6 days ago     718MB
+yetisno/mineos-lts-java   latest       0c24f1172457   6 days ago     718MB
 ```
 
 ## CREATE A VOLUME
@@ -39,19 +39,19 @@ Create a docker volume to contain the /var/games/minecraft filetree, allowing th
 Start the container, and let docker keep it restart it anytime it is down, unless deliberately stopped via command line.
 
 ```
-# export MINEOS_UN=mc
-# read -s MINEOS_PW
-# export MINEOS_PW
+# export USER_NAME=mc
+# read -s USER_PASSWORD
+# export USER_PASSWORD
 
 # docker run -td \
 --name=mineos \
 -p 8443:8443 \
 -p 25565:25565 \
--e MINEOS_UN \
--e MINEOS_PW \
+-e USER_NAME \
+-e USER_PASSWORD \
 -v mineos:/var/games/minecraft \
 --restart=unless-stopped \
-hexparrot/mineos:latest
+yetisno/mineos-lts-java:latest
 ```
 
 ## FILESYSTEM FOOTPRINT
@@ -109,4 +109,3 @@ Note the `uid` is zero (`0`) in the container (`root`-owned) and `1000` (or some
 ## Conclusion
 
 Docker handles all the hard stuff--including port forwarding--through the invocation command `docker run`. Docker instances only need be pulled and restarted to engage new updates from the upstream git repository. This makes for a very easy management of MineOS installations.
-

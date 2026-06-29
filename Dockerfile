@@ -1,8 +1,9 @@
-FROM ubuntu:focal
+FROM ubuntu:26.04
 LABEL MAINTAINER='William Dizon <wdchromium@gmail.com>'
 
 #update and accept all prompts
 ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_VERSION=14.21.3
 RUN apt-get update && apt-get install -y \
   supervisor \
   rdiff-backup \
@@ -12,32 +13,37 @@ RUN apt-get update && apt-get install -y \
   curl \
   rlwrap \
   unzip \
-  openjdk-21-jre-headless \
+  xz-utils \
+  ca-certificates \
+  openjdk-26-jre-headless \
   openjdk-8-jre-headless \
   ca-certificates-java \
   && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-#install node from nodesource following instructions: https://github.com/nodesource/distributions#debinstall
-RUN curl -fsSL https://deb.nodesource.com/setup_14.x | bash - \
-  && apt-get install -y nodejs \
-  && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+#install Node.js 14 for MineOS native dependencies
+RUN node_arch="$(dpkg --print-architecture)" \
+  && case "$node_arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; armhf) node_arch=armv7l ;; *) echo "Unsupported architecture: $node_arch" >&2; exit 1 ;; esac \
+  && curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz \
+  | tar -xJ -C /usr/local --strip-components=1 \
+  && ln -sf /usr/local/bin/node /usr/bin/node \
+  && npm install -g npm@8.19.4
 
-#download mineos from github
-RUN mkdir /usr/games/minecraft \
-  && cd /usr/games/minecraft \
-  && git clone --depth=1 https://github.com/hexparrot/mineos-node.git . \
-  && cp mineos.conf /etc/mineos.conf \
-  && chmod +x webui.js mineos_console.js service.js
+WORKDIR /usr/games/minecraft
 
 #build npm deps and clean up apt for image minimalization
-RUN cd /usr/games/minecraft \
-  && apt-get update \
-  && apt-get install -y build-essential \
-  && npm install \
+COPY package.json package-lock.json ./
+RUN apt-get update \
+  && apt-get install -y build-essential python3 python3-setuptools \
+  && npm ci --only=production \
   && apt-get remove --purge -y build-essential \
   && apt-get autoremove -y \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+#copy mineos from this build context
+COPY . .
+RUN cp mineos.conf /etc/mineos.conf \
+  && chmod +x webui.js mineos_console.js service.js
 
 #configure and run supervisor
 RUN cp /usr/games/minecraft/init/supervisor_conf /etc/supervisor/conf.d/mineos.conf

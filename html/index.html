@@ -176,6 +176,15 @@
 
                                     <!-- START Menu -->
                                     <li class="accordion-group">
+                                        <a ng-click="change_page('buildtools')">
+                                            <span class="icon icone-tags"></span>
+                                            <span class="text">Paper</span>
+                                        </a>
+                                    </li>
+                                    <!--/ END Menu -->
+
+                                    <!-- START Menu -->
+                                    <li class="accordion-group">
                                         <a ng-click="change_page('calendar')">
                                             <span class="icon icone-calendar"></span>
                                             <span class="text" translate="CALENDAR"></span>
@@ -736,6 +745,7 @@
                                             <tr>
                                                 <th translate="IDENTIFIER" class="span4"></th>
                                                 <th>Spigot <br><button type="button" class="btn btn-mini btn-success" ng-click="host_command('download', {profile: buildtools_jar})" translate="DOWNLOAD_BUILDTOOLS"></button></th>
+                                                <th>Paper</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -749,6 +759,11 @@
                                                     <button type="button" class="btn btn-mini btn-success" ng-click="host_command('build_jar', {builder: buildtools_jar, version: jar.id})" ng-disabled="!buildtools_jar.downloaded" translate="BUILD_SPIGOT"></button>
                                                     <button type="button" class="btn btn-mini btn-danger" ng-click="host_command('delete_build', {version: jar.id, type: 'spigot'})" ng-show="spigot_list['spigot_' + jar.id].jarfiles.length" translate="DELETE"></button>
                                                     <button type="button" class="btn btn-mini btn-primary" ng-click="modals.open_copy_to_server(jar.id, 'spigot')" ng-show="spigot_list['spigot_' + jar.id].jarfiles.length" translate="COPY_TO_SERVER"></button>
+                                                </td>
+                                                <td>
+                                                    <button type="button" class="btn btn-mini btn-success" ng-click="host_command('build_jar', {builder: paper_builder, version: jar.id})" ng-disabled="!paper_versions[jar.id]" translate="BUILD_PAPER"></button>
+                                                    <button type="button" class="btn btn-mini btn-danger" ng-click="host_command('delete_build', {version: jar.id, type: 'paper'})" ng-show="spigot_list['paper_' + jar.id].jarfiles.length" translate="DELETE"></button>
+                                                    <button type="button" class="btn btn-mini btn-primary" ng-click="modals.open_copy_to_server(jar.id, 'paper')" ng-show="spigot_list['paper_' + jar.id].jarfiles.length" translate="COPY_TO_SERVER"></button>
                                                 </td>
                                             </tr>
                                         </tbody>

@@ -30,7 +30,7 @@ The [MineOS Turnkey ISO](https://my.syncplicity.com/share/8t6enbd00wymdfq/mineos
 
 Sysadmins familiar with Docker or unRAID also have easy deployment options:
 
-- [Docker](install/docker.md) (via [hub.docker.com](https://hub.docker.com/repository/docker/hexparrot/mineos))
+- [Docker](install/docker.md) (via [hub.docker.com](https://hub.docker.com/repository/docker/yetisno/mineos-lts-java))
 - Docker via [manual build](https://github.com/hexparrot/mineos-node/blob/master/Dockerfile)
 - Appliance in unRAID
 
